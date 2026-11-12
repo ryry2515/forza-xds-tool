@@ -1,6 +1,8 @@
 """Decode the base mip level of a .xds texture (raw Xbox 360 texture) to PNG.
 
-Usage: python xds_tool.py in.xds [out.png]
+Usage: python xds_tool.py in.xds|in.xdc [out.png]
+       python xds_tool.py in.xdc out.xds        (unpack a profile thumbnail)
+       python xds_tool.py in.xds out.xdc        (pack it back)
        python xds_tool.py encode new.png original.xds out.xds   (8888 and DXT5 textures)
 Needs numpy. Supported formats: 0x35 (DXT5, also encoded), 0x12 (DXT1), 0x13 (DXT3),
 0x06 and 0x32 (8888). Other formats are reported and skipped.
@@ -139,7 +141,50 @@ def decode_blocks(blocks, kind):
     return px
 
 
+# ---- .xdc (compressed .xds, used for profile thumbnails) ---------------------
+XDC_MAGIC = b"cxds"
+
+
+def is_xdc(data):
+    return data[:4] == XDC_MAGIC
+
+
+def unpack_xdc(data):
+    """.xdc -> the .xds bytes inside.
+
+    Layout: 'cxds', u32 version (2), u32 uncompressed size, then chunks of
+    [u32 compressed size][u32 uncompressed size][raw deflate]."""
+    import zlib
+    if not is_xdc(data) or struct.unpack(">I", data[4:8])[0] != 2:
+        raise ValueError("not a version 2 .xdc file")
+    total = struct.unpack(">I", data[8:12])[0]
+    p, out = 12, bytearray()
+    while p < len(data):
+        clen, ulen = struct.unpack(">II", data[p:p + 8])
+        p += 8
+        raw = zlib.decompress(data[p:p + clen], -15)
+        if len(raw) != ulen:
+            raise ValueError("bad chunk length")
+        out += raw
+        p += clen
+    if len(out) != total:
+        raise ValueError("size does not match header")
+    return bytes(out)
+
+
+def pack_xdc(xds):
+    """.xds bytes -> .xdc (one chunk, like the game's own thumbnails)."""
+    import zlib
+    if len(xds) > 0x1000000:
+        raise ValueError("too large for an .xdc (16 MB limit in the game)")
+    co = zlib.compressobj(9, zlib.DEFLATED, -15)
+    comp = co.compress(xds) + co.flush()
+    return XDC_MAGIC + struct.pack(">IIII", 2, len(xds), len(comp), len(xds)) + comp
+
+
 def decode(data):
+    if is_xdc(data):
+        data = unpack_xdc(data)
     hd = parse_header(data)
     fmt = FORMATS.get(hd["format"])
     if not fmt:
@@ -155,6 +200,17 @@ def decode(data):
     bw, bh = (W + 3) // 4, (H + 3) // 4
     blocks = untile(body, bw, bh, bpu, log, hd["tiled"])
     return decode_blocks(blocks, kind)[:H, :W], hd
+
+
+def noise_score(rgba):
+    """Mean difference between neighbouring pixels (RGB). Pictures score low (about 1 to 30);
+    random data scores 70 or more. Some profile thumbnails in saves are noise inside the file itself."""
+    a = rgba[..., :3].astype(np.float32)
+    return float(np.abs(np.diff(a, axis=1)).mean())
+
+
+def looks_like_noise(rgba):
+    return noise_score(rgba) > 45
 
 
 def write_png(path, rgba):
@@ -296,16 +352,30 @@ def read_png(path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "encode":
-        # python xds_tool.py encode new.png original.xds out.xds  (8888 and DXT5 textures)
-        tpl = open(sys.argv[3], "rb").read()
+    args = sys.argv[1:]
+    if len(args) >= 4 and args[0] == "encode":
+        # python xds_tool.py encode new.png original.xds|xdc out.xds|xdc
+        raw = open(args[2], "rb").read()
+        tpl = unpack_xdc(raw) if is_xdc(raw) else raw
         enc = encode_dxt5 if parse_header(tpl)["format"] == 0x35 else encode_8888
-        data = enc(read_png(sys.argv[2]), tpl)
-        open(sys.argv[4], "wb").write(data)
-        print("wrote", sys.argv[4], len(data), "bytes")
-        sys.exit(0)
-    src = sys.argv[1]
-    dst = sys.argv[2] if len(sys.argv) > 2 else src.rsplit(".", 1)[0] + ".png"
-    img, hd = decode(open(src, "rb").read())
-    write_png(dst, img)
-    print(src, "->", dst, img.shape, "format 0x%02x" % hd["format"])
+        data = enc(read_png(args[1]), tpl)
+        if args[3].lower().endswith(".xdc"):
+            data = pack_xdc(data)
+        open(args[3], "wb").write(data)
+        print("wrote", args[3], len(data), "bytes")
+    elif len(args) == 2 and args[0].lower().endswith(".xdc") and args[1].lower().endswith(".xds"):
+        data = unpack_xdc(open(args[0], "rb").read())
+        open(args[1], "wb").write(data)
+        print(args[0], "->", args[1], len(data), "bytes")
+    elif len(args) == 2 and args[0].lower().endswith(".xds") and args[1].lower().endswith(".xdc"):
+        data = pack_xdc(open(args[0], "rb").read())
+        open(args[1], "wb").write(data)
+        print(args[0], "->", args[1], len(data), "bytes")
+    elif args:
+        src = args[0]
+        dst = args[1] if len(args) > 1 else src.rsplit(".", 1)[0] + ".png"
+        img, hd = decode(open(src, "rb").read())
+        write_png(dst, img)
+        print(src, "->", dst, img.shape, "format 0x%02x" % hd["format"])
+    else:
+        print(__doc__)
