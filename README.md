@@ -2,7 +2,11 @@
 
 A small Windows window for **Forza Horizon 1 `.xds` textures** (Xbox 360 format): open one, see it as a picture, save it as a PNG, and put an edited PNG back into an `.xds`.
 
-## Use it
+## Download (no Python)
+
+Get `ForzaXdsTool-0.1.0-windows.zip` from the [Releases page](https://github.com/ryry2515/forza-xds-tool/releases/latest), extract it and run `ForzaXdsTool.exe`. Windows may warn about an unknown publisher because the exe is not code-signed.
+
+## Use it from source
 
 1. Install [Python 3](https://www.python.org/downloads/) and then, once: `pip install numpy pillow`
 2. Run `python xds_gui.py` (or `python xds_gui.py some.xds`).
